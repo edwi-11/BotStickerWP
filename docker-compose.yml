@@ -1,0 +1,17 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      WA_AUTH_DIR: /srv/auth
+      TEMP_DIR: /srv/temp
+    volumes:
+      - wa_auth:/srv/auth   # sesión de WhatsApp: persiste entre reinicios
+      - /srv/temp           # temporales efímeros, no persisten
+    # Sin acceso al Docker daemon del host ni puertos publicados: el bot solo habla con WhatsApp.
+    stdin_open: true        # útil para ver el QR/código de vinculación con `docker compose attach bot`
+    tty: true
+
+volumes:
+  wa_auth:

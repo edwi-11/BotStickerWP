@@ -1,0 +1,9 @@
+.env
+node_modules/
+auth/*
+!auth/.gitkeep
+temp/*
+!temp/.gitkeep
+__pycache__/
+.git
+tests/
