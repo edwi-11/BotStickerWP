@@ -49,11 +49,29 @@ Acepta MP4, MOV y WebM. El proceso:
 - Convierte con FFmpeg a WebP animado 512×512, bajando FPS/calidad en pasos hasta caber
   en 500 KB.
 
+## Enlaces
+
+Si el mensaje es **solo un enlace** (o `/sticker <enlace>`), el bot lo abre y convierte su contenido:
+
+- **Enlace directo** a una imagen, GIF o video (`.jpg`, `.png`, `.webp`, `.gif`, `.mp4`...): lo descarga y lo convierte.
+- **Enlace a una página web** (Imgur, Pinterest, una noticia, una tienda...): usa el video o la imagen de su
+  vista previa (`og:video`, `og:image`, `twitter:image`). Si el video es un reproductor incrustado, cae a la imagen.
+- Un enlace dentro de una frase se ignora, para no responder a cualquier conversación.
+- No descarga videos de redes sociales (TikTok, Instagram, YouTube...): esas plataformas exigen herramientas
+  específicas y cambian a menudo.
+
+Como cualquiera puede mandar un enlace, `src/linkfetch.js` se protege contra **SSRF** (que alguien haga que el bot
+abra `localhost` o tu red interna): solo `http`/`https`, puertos 80/443, sin usuario/contraseña en la URL, y cada
+salto (también las redirecciones) se resuelve por DNS y se rechaza si apunta a una IP privada o local; la conexión
+se fija a la IP ya validada (evita *DNS rebinding*). Además hay límites de tamaño (`MAX_DOWNLOAD_MB`), de
+redirecciones (5) y de tiempo (`LINK_TIMEOUT_MS`), y aplica el mismo límite por minuto que los archivos.
+
 ## Comandos
 
 ```
-/menu    - Muestra la ayuda
-/status  - Ver el estado de la conexión de WhatsApp
+/menu             - Muestra la ayuda
+/status           - Ver el estado de la conexión de WhatsApp
+/sticker <enlace> - Igual que enviar solo el enlace
 ```
 
 ## Requisitos
@@ -89,6 +107,7 @@ Ver `.env.example`. Las más relevantes:
 | `RATE_LIMIT_PER_MIN` | Archivos máximos por minuto por chat |
 | `STICKER_MAX_RATIO` | Cuánto puede alargarse el sticker (lado largo / lado corto). `1` = cuadrado exacto, `1.2` = casi cuadrado (por defecto), `99` = sin recortar |
 | `BAILEYS_LOG_LEVEL` | Nivel de log de Baileys (`warn` por defecto; `debug` para diagnosticar) |
+| `LINK_TIMEOUT_MS` | Tiempo máximo para descargar el contenido de un enlace (20000 por defecto) |
 | `PYTHON_BIN` | Binario de Python a invocar (`python3` por defecto) |
 
 ## Docker
@@ -102,11 +121,12 @@ La sesión de WhatsApp se persiste en el volumen `wa_auth`.
 
 ## Pruebas
 
-El conversor se puede probar de forma aislada, sin WhatsApp:
+El conversor y el descargador de enlaces se pueden probar de forma aislada, sin WhatsApp:
 
 ```bash
 cd python && pip install pytest -r requirements.txt
-pytest ../tests
+pytest ../tests          # conversor de stickers (Python)
+cd .. && npm test        # descarga de enlaces y protección SSRF (Node)
 ```
 
 ## Solución de problemas
@@ -127,4 +147,3 @@ Prueba siempre escribiendo desde **otro número**, no desde el teléfono al que 
 - Los comandos `/menu` y `/status` responden a cualquiera que escriba en el chat; si
   quieres restringirlos a ciertos números, es fácil añadir una lista blanca en
   `src/handlers.js`.
-# BotStickerWP

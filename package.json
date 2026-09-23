@@ -8,10 +8,11 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test tests/linkfetch.test.mjs"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "@whiskeysockets/baileys": "latest",
     "dotenv": "^16.4.5",
     "pino": "^9.0.0",
     "qrcode-terminal": "^0.12.0"
