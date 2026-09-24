@@ -28,7 +28,10 @@ const MAX_REDIRECTS = 5;
 const MAX_CANDIDATES = 4;
 const MAX_HTML_BYTES = 1024 * 1024; // las etiquetas <meta> estan al principio de la pagina
 const ALLOWED_PORTS = new Set(['', '80', '443']);
-const USER_AGENT = 'Mozilla/5.0 (compatible; WhatsAppStickerBot/1.0)';
+const USER_AGENT = process.env.LINK_USER_AGENT ||
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+// Si el sitio no da respuesta/datos en este tiempo (ms) se corta esa conexion y se reintenta.
+const SOCKET_IDLE_MS = Number(process.env.LINK_IDLE_MS || 12_000);
 
 // ---------------------------------------------------------------------------
 // Extraer el enlace del mensaje
@@ -125,14 +128,15 @@ async function resolveSafe(url, allowed) {
   if (!allowed && addresses.some((a) => !isPublicAddress(a.address))) {
     throw new LinkError('Ese enlace no esta permitido.');
   }
-  return addresses.find((a) => a.family === 4) || addresses[0];
+  // IPv4 primero; el resto queda como respaldo si la primera no responde.
+  return [...addresses].sort((a, b) => (a.family === 4 ? -1 : 1) - (b.family === 4 ? -1 : 1));
 }
 
 // ---------------------------------------------------------------------------
 // Peticion HTTP con conexion fijada a la IP validada
 // ---------------------------------------------------------------------------
 
-function requestOnce(url, { address, family }, signal) {
+function requestOnce(url, addresses, signal) {
   return new Promise((resolve, reject) => {
     const lib = url.protocol === 'https:' ? https : http;
     const req = lib.request(
@@ -149,13 +153,18 @@ function requestOnce(url, { address, family }, signal) {
           'Accept-Encoding': 'gzip, deflate, br',
         },
         // Fuerza a conectar a la IP que ya validamos (evita DNS rebinding).
+        // Node prueba las IP ya validadas una por una (con respaldo si alguna no responde).
+        autoSelectFamily: true,
         lookup: (_host, options, cb) =>
           options && options.all
-            ? cb(null, [{ address, family }])
-            : cb(null, address, family),
+            ? cb(null, addresses)
+            : cb(null, addresses[0].address, addresses[0].family),
       },
       resolve,
     );
+    req.setTimeout(SOCKET_IDLE_MS, () => {
+      req.destroy(Object.assign(new Error('Sin respuesta del sitio'), { code: 'ETIMEDOUT' }));
+    });
     req.on('error', reject);
     req.end();
   });
@@ -167,8 +176,15 @@ async function openUrl(startUrl, opts) {
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
     const { url, allowed } = checkUrl(current, opts);
-    const target = await resolveSafe(url, allowed);
-    const res = await requestOnce(url, target, opts.signal);
+    const targets = await resolveSafe(url, allowed);
+    let res;
+    try {
+      res = await requestOnce(url, targets, opts.signal);
+    } catch (e) {
+      if (opts.signal.aborted) throw e;
+      log.warn({ url: url.href, err: e?.code || e?.message }, 'Fallo la conexion; reintentando');
+      res = await requestOnce(url, targets, opts.signal);
+    }
     const status = res.statusCode || 0;
 
     if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
@@ -346,7 +362,7 @@ export async function fetchLinkMedia(url, options) {
   const {
     dir,
     maxBytes = 20 * 1024 * 1024,
-    timeoutMs = 20_000,
+    timeoutMs = 45_000,
     allowHostPorts = [],
   } = options;
   const opts = { signal: AbortSignal.timeout(timeoutMs), allowHostPorts };

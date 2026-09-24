@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +25,18 @@ dispatch.handleMessage = createMessageHandler({ bot, tempDir: TEMP_DIR, startedA
 
 process.on('unhandledRejection', (e) => log.error({ err: String(e) }, 'unhandledRejection'));
 process.on('uncaughtException', (e) => log.error({ err: e.message }, 'uncaughtException'));
+
+// Revisa las herramientas externas al arrancar: sin FFmpeg los videos fallan siempre.
+for (const [name, args] of [
+  [process.env.PYTHON_BIN || 'python3', ['-c', 'import PIL']],
+  ['ffmpeg', ['-version']],
+  ['ffprobe', ['-version']],
+]) {
+  const r = spawnSync(name, args, { stdio: 'ignore' });
+  if (r.error || r.status !== 0) {
+    log.error(`NO se encontro/funciona "${name}": los stickers (sobre todo de VIDEO) no se van a generar. Instalalo y reinicia.`);
+  }
+}
 
 log.info('Iniciando bot de stickers de WhatsApp...');
 bot.connect().catch((e) => {

@@ -20,7 +20,7 @@ const MAX_DOWNLOAD_BYTES =
   1024;
 
 const LINK_TIMEOUT_MS =
-  Number(process.env.LINK_TIMEOUT_MS || 20000);
+  Number(process.env.LINK_TIMEOUT_MS || 45000);
 
 const RATE_LIMIT_PER_MIN =
   Number(process.env.RATE_LIMIT_PER_MIN || 10);
@@ -131,6 +131,18 @@ function extractMedia(msg) {
       kind: 'video',
       media: content.videoMessage,
     };
+  }
+
+  // Video/imagen enviado "como documento"
+  const doc =
+    content.documentMessage ||
+    content.documentWithCaptionMessage?.message?.documentMessage;
+  const mime = String(doc?.mimetype || '');
+  if (doc && mime.startsWith('video/')) {
+    return { kind: 'video', media: doc };
+  }
+  if (doc && mime.startsWith('image/')) {
+    return { kind: 'image', media: doc };
   }
 
   return null;
@@ -332,6 +344,7 @@ export function createMessageHandler({
       stickerBuffer,
       {
         quoted: msg,
+        animated: Boolean(conversionResult?.animated),
       }
     );
 
@@ -858,10 +871,20 @@ export function createMessageHandler({
           'Error procesando multimedia'
         );
 
+        try {
+          if (processing?.key) {
+            await sock.sendMessage(jid, { delete: processing.key });
+          }
+        } catch {
+          // no es critico
+        }
+
         await sendText(
           bot,
           jid,
-          'No pude convertir ese archivo en sticker. Intenta con otra imagen o video.',
+          e instanceof ConversionError
+            ? e.message
+            : 'No pude convertir ese archivo en sticker. Intenta con otra imagen o video.',
           msg
         );
       } finally {

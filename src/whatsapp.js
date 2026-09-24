@@ -324,6 +324,8 @@ export function createWhatsAppBot({ authDir, onMessage }) {
       'Preparando envio de sticker'
     );
 
+    const { animated, ...sendOptions } = options;
+
     try {
       const result =
         await sock.sendMessage(
@@ -331,8 +333,9 @@ export function createWhatsAppBot({ authDir, onMessage }) {
           {
             sticker: stickerBuffer,
             mimetype: 'image/webp',
+            isAnimated: Boolean(animated),
           },
-          options
+          sendOptions
         );
 
       remember(result);
