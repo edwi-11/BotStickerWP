@@ -367,6 +367,27 @@ export function createWhatsAppBot({ authDir, onMessage }) {
     }
   }
 
+  async function sendVideo(jid, videoBuffer, options = {}) {
+    if (!sock) {
+      throw new Error('WhatsApp no esta conectado.');
+    }
+
+    try {
+      const result = await sock.sendMessage(
+        jid,
+        { video: videoBuffer, mimetype: 'video/mp4' },
+        options
+      );
+
+      remember(result);
+      log.info({ jid, bytes: videoBuffer.length, messageId: result?.key?.id || null }, 'Video enviado');
+      return result;
+    } catch (e) {
+      log.error({ jid, err: e?.stack || e?.message || String(e) }, 'ERROR ENVIANDO VIDEO');
+      throw e;
+    }
+  }
+
   async function downloadMedia(msg) {
     if (!sock) {
       throw new Error(
@@ -390,5 +411,6 @@ export function createWhatsAppBot({ authDir, onMessage }) {
     downloadMedia,
     sendText,
     sendSticker,
+    sendVideo,
   };
 }

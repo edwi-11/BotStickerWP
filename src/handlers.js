@@ -13,6 +13,7 @@ import crypto from 'node:crypto';
 import { ConversionError, convertToSticker } from './converter.js';
 import { extractLinkUrl, fetchLinkMedia, LinkError } from './linkfetch.js';
 import { log } from './logger.js';
+import { downloadSocialVideo, findSocialUrl, SocialError, socialPlatform } from './socialvideo.js';
 
 const MAX_DOWNLOAD_BYTES =
   Number(process.env.MAX_DOWNLOAD_MB || 20) *
@@ -24,6 +25,16 @@ const LINK_TIMEOUT_MS =
 
 const RATE_LIMIT_PER_MIN =
   Number(process.env.RATE_LIMIT_PER_MIN || 10);
+
+const VIDEO_MAX_MB = Number(process.env.VIDEO_MAX_MB || 16);
+const VIDEO_MAX_MINUTES = Number(process.env.VIDEO_MAX_MINUTES || 10);
+const CHOICE_TIMEOUT_MS = Number(process.env.CHOICE_TIMEOUT_SEC || 120) * 1000;
+const YTDLP_TIMEOUT_MS = Number(process.env.YTDLP_TIMEOUT_MS || 180000);
+const GROUP_LINK_PROMPT = String(process.env.GROUP_LINK_PROMPT ?? 'true').toLowerCase() !== 'false';
+
+// Enlaces de TikTok/YouTube esperando que la persona responda 1, 2 o 3.
+// Clave: chat + persona, asi en un grupo cada quien contesta lo suyo.
+const pendingChoices = new Map();
 
 const seenMessages = new Set();
 const rateMap = new Map();
@@ -456,6 +467,119 @@ export function createMessageHandler({
   }
 
 
+
+  // ---- TikTok / YouTube: se pregunta 1-descargar, 2-sticker, 3-ambos ----
+  function choiceKey(jid, msg) {
+    return jid + '|' + (msg.key?.participant || msg.key?.participantAlt || jid);
+  }
+
+  async function askChoice({ jid, msg, url }) {
+    const platform = socialPlatform(url);
+    const now = Date.now();
+
+    for (const [k, v] of pendingChoices) {
+      if (now - v.at > CHOICE_TIMEOUT_MS) pendingChoices.delete(k);
+    }
+    pendingChoices.set(choiceKey(jid, msg), { url, at: now, msg });
+
+    await sendText(
+      bot,
+      jid,
+      [
+        `Enlace de ${platform} detectado. Responde solo con el numero:`,
+        '',
+        '1 - Descargar el video (sin marca de agua)',
+        '2 - Generar sticker',
+        '3 - Ambos',
+      ].join('\n'),
+      msg
+    );
+  }
+
+  // Devuelve true si el mensaje era la respuesta 1/2/3 a un enlace pendiente.
+  async function handleChoiceReply({ sock, jid, msg, text }) {
+    if (!/^[123]$/.test(text)) return false;
+
+    const key = choiceKey(jid, msg);
+    const pend = pendingChoices.get(key);
+    if (!pend) return false;
+
+    pendingChoices.delete(key);
+    if (Date.now() - pend.at > CHOICE_TIMEOUT_MS) {
+      await sendText(bot, jid, 'Se acabo el tiempo. Vuelve a enviar el enlace.', msg);
+      return true;
+    }
+
+    if (!checkRateLimit(key)) {
+      await sendText(bot, jid, 'Demasiados archivos en poco tiempo. Espera un momento e intenta nuevamente.', msg);
+      return true;
+    }
+
+    const wantVideo = text === '1' || text === '3';
+    const wantSticker = text === '2' || text === '3';
+
+    const processing = await sendText(bot, jid, 'Descargando video...', pend.msg);
+    const jobDir = path.join(
+      tempDir,
+      String(Date.now()) + '-' + crypto.randomBytes(16).toString('hex').toUpperCase()
+    );
+    mkdirSync(jobDir, { recursive: true });
+
+    const deleteProcessing = async () => {
+      try {
+        if (processing?.key) await sock.sendMessage(jid, { delete: processing.key });
+      } catch {
+        // no es critico
+      }
+    };
+
+    try {
+      const dl = await downloadSocialVideo(pend.url, {
+        dir: jobDir,
+        maxMb: wantVideo ? VIDEO_MAX_MB : 19, // el conversor acepta hasta 20 MB de entrada
+        maxMinutes: VIDEO_MAX_MINUTES,
+        height: wantVideo ? 720 : 480, // para el sticker basta con menos calidad (mas rapido)
+        timeoutMs: YTDLP_TIMEOUT_MS,
+      });
+
+      log.info({ jid, url: pend.url, bytes: dl.bytes, opcion: text }, 'Video descargado');
+
+      if (wantVideo) {
+        await bot.sendVideo(jid, readFileSync(dl.filePath), { quoted: pend.msg });
+      }
+
+      if (wantSticker) {
+        // El conversor toma solo los primeros segundos que admite un sticker animado.
+        await convertAndReply({
+          sock,
+          jid,
+          msg: pend.msg,
+          inputPath: dl.filePath,
+          jobDir,
+          kind: 'video',
+          processing,
+        });
+      } else {
+        await deleteProcessing();
+      }
+    } catch (e) {
+      log.warn({ jid, url: pend.url, err: e?.stack || e?.message || String(e) }, 'Error con enlace de video');
+      await deleteProcessing();
+      await sendText(
+        bot,
+        jid,
+        e instanceof SocialError || e instanceof ConversionError
+          ? e.message
+          : 'No pude procesar ese video.',
+        pend.msg
+      );
+    } finally {
+      cleanupJobDir(jobDir);
+    }
+
+    return true;
+  }
+
   // Descarga `source` (mensaje con imagen/video), lo convierte y responde citando `msg`.
   async function handleMedia({ sock, jid, msg, media, source, rateKey }) {
     if (!checkRateLimit(rateKey)) {
@@ -539,6 +663,16 @@ export function createMessageHandler({
   async function handleGroup({ sock, jid, msg, content, text }) {
     const first = text.split(/\s+/)[0].toLowerCase();
 
+    // Mensaje que es SOLO un enlace de TikTok/YouTube (o "/s <enlace>"): se pregunta 1/2/3.
+    const groupLink = extractLinkUrl(text);
+    if (groupLink && socialPlatform(groupLink)) {
+      const explicit = first === '/s' || first === '/sticker';
+      if (explicit || GROUP_LINK_PROMPT) {
+        await askChoice({ jid, msg, url: groupLink });
+      }
+      return;
+    }
+
     if (first === '/menu' || first === '/ayuda' || first === '/help') {
       await sendText(
         bot,
@@ -548,6 +682,7 @@ export function createMessageHandler({
           '',
           'Responde a una foto o video con /s y lo convierto en sticker.',
           'Tambien funciona con un enlace: /s <enlace>',
+          'Enlace de TikTok/YouTube: te pregunto 1-descargar, 2-sticker o 3-ambos.',
         ].join('\n'),
         msg
       );
@@ -601,6 +736,10 @@ export function createMessageHandler({
 
       // respondiendo a un mensaje que es solo un enlace
       const quotedLink = extractLinkUrl(extractText({ message: quoted }));
+      if (quotedLink && socialPlatform(quotedLink)) {
+        await askChoice({ jid, msg, url: quotedLink });
+        return;
+      }
       if (quotedLink) {
         await handleLink({ sock, jid, msg, linkUrl: quotedLink });
         return;
@@ -700,6 +839,10 @@ export function createMessageHandler({
       const text =
         extractText(msg);
 
+      if (await handleChoiceReply({ sock, jid, msg, text })) {
+        return;
+      }
+
       if (jid.endsWith('@g.us')) {
         await handleGroup({ sock, jid, msg, content, text });
         return;
@@ -739,6 +882,7 @@ export function createMessageHandler({
               '',
               'Enviame una foto o video y lo convertire en sticker.',
               'Tambien puedes enviarme un enlace a una imagen, GIF o video (o a una pagina con imagen) y lo convierto.',
+              'Con un enlace de TikTok o YouTube puedes elegir: descargar el video, hacer sticker o ambos.',
               '',
               'Comandos:',
               'En grupos: responde a una foto o video con /s.',
@@ -794,6 +938,13 @@ export function createMessageHandler({
       }
 
       if (text && !content.imageMessage && !content.videoMessage) {
+        const socialUrl = findSocialUrl(text);
+
+        if (socialUrl) {
+          await askChoice({ jid, msg, url: socialUrl });
+          return;
+        }
+
         const linkUrl = extractLinkUrl(text);
 
         if (linkUrl) {

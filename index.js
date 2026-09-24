@@ -31,10 +31,11 @@ for (const [name, args] of [
   [process.env.PYTHON_BIN || 'python3', ['-c', 'import PIL']],
   ['ffmpeg', ['-version']],
   ['ffprobe', ['-version']],
+  [process.env.YTDLP_BIN || 'yt-dlp', ['--version']],
 ]) {
   const r = spawnSync(name, args, { stdio: 'ignore' });
   if (r.error || r.status !== 0) {
-    log.error(`NO se encontro/funciona "${name}": los stickers (sobre todo de VIDEO) no se van a generar. Instalalo y reinicia.`);
+    log.error(`NO se encontro/funciona "${name}": esa funcion no va a andar (FFmpeg/ffprobe: videos y stickers; yt-dlp: enlaces de TikTok/YouTube). Instalalo y reinicia.`);
   }
 }
 

@@ -66,6 +66,20 @@ salto (también las redirecciones) se resuelve por DNS y se rechaza si apunta a 
 se fija a la IP ya validada (evita *DNS rebinding*). Además hay límites de tamaño (`MAX_DOWNLOAD_MB`), de
 redirecciones (5) y de tiempo (`LINK_TIMEOUT_MS`), y aplica el mismo límite por minuto que los archivos.
 
+## TikTok y YouTube
+
+Al enviar un enlace de TikTok o YouTube (en privado o en un grupo) el bot pregunta:
+
+```
+1 - Descargar el video (sin marca de agua)
+2 - Generar sticker
+3 - Ambos
+```
+
+La persona responde solo con el número (tiene `CHOICE_TIMEOUT_SEC` segundos; en grupos solo vale la respuesta de quien envió el enlace). Usa `yt-dlp` (se instala con `python/requirements.txt`).
+El sticker se recorta automáticamente a la duración que admite un sticker animado. Límites: `VIDEO_MAX_MB`, `VIDEO_MAX_MINUTES`.
+Si `yt-dlp` deja de funcionar (los sitios cambian a menudo), reconstruye sin caché: `docker compose build --no-cache && docker compose up -d`.
+
 ## Grupos
 
 Puedes agregar el número del bot a un grupo. Ahí **no responde a nada automáticamente**; solo actúa con:
