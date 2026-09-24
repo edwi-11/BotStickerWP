@@ -43,7 +43,7 @@ const SOCKET_IDLE_MS = Number(process.env.LINK_IDLE_MS || 12_000);
  */
 export function extractLinkUrl(text) {
   if (typeof text !== 'string') return null;
-  const m = text.trim().match(/^(?:\/sticker\s+)?<?(https?:\/\/[^\s<>]+)>?$/i);
+  const m = text.trim().match(/^(?:\/(?:sticker|s)\s+)?<?(https?:\/\/[^\s<>]+)>?$/i);
   return m ? m[1] : null;
 }
 

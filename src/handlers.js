@@ -455,6 +455,161 @@ export function createMessageHandler({
     }
   }
 
+
+  // Descarga `source` (mensaje con imagen/video), lo convierte y responde citando `msg`.
+  async function handleMedia({ sock, jid, msg, media, source, rateKey }) {
+    if (!checkRateLimit(rateKey)) {
+      await sendText(bot, jid, 'Demasiados archivos en poco tiempo. Espera un momento e intenta nuevamente.', msg);
+      return;
+    }
+
+    const maxMb = Math.round(MAX_DOWNLOAD_BYTES / 1024 / 1024);
+    const declaredSize = Number(media.media?.fileLength || 0);
+
+    if (declaredSize > MAX_DOWNLOAD_BYTES) {
+      await sendText(bot, jid, 'El archivo pesa demasiado. Maximo permitido: ' + maxMb + ' MB.', msg);
+      return;
+    }
+
+    const processing = await sendText(
+      bot,
+      jid,
+      media.kind === 'video' ? 'Procesando video...' : 'Procesando imagen...',
+      msg
+    );
+
+    const jobDir = path.join(
+      tempDir,
+      String(Date.now()) + '-' + crypto.randomBytes(16).toString('hex').toUpperCase()
+    );
+    mkdirSync(jobDir, { recursive: true });
+
+    try {
+      const buffer = await bot.downloadMedia(source);
+
+      if (!buffer || buffer.length === 0) {
+        throw new Error('La descarga devolvio un buffer vacio.');
+      }
+      if (buffer.length > MAX_DOWNLOAD_BYTES) {
+        await sendText(bot, jid, 'El archivo supera el limite de ' + maxMb + ' MB.', msg);
+        return;
+      }
+
+      const inputPath = path.join(jobDir, 'input.bin');
+      writeFileSync(inputPath, buffer);
+
+      await convertAndReply({
+        sock,
+        jid,
+        msg,
+        inputPath,
+        jobDir,
+        kind: media.kind,
+        processing,
+      });
+    } catch (e) {
+      log.error(
+        { jid, kind: media.kind, err: e?.stack || e?.message || String(e) },
+        'Error procesando multimedia'
+      );
+
+      try {
+        if (processing?.key) {
+          await sock.sendMessage(jid, { delete: processing.key });
+        }
+      } catch {
+        // no es critico
+      }
+
+      await sendText(
+        bot,
+        jid,
+        e instanceof ConversionError
+          ? e.message
+          : 'No pude convertir ese archivo en sticker. Intenta con otra imagen o video.',
+        msg
+      );
+    } finally {
+      cleanupJobDir(jobDir);
+    }
+  }
+
+  // En grupos el bot SOLO actua con "/s" (responder a una foto/video, o /s en el pie de la
+  // foto/video, o "/s <enlace>"). Todo lo demas se ignora para no molestar al grupo.
+  async function handleGroup({ sock, jid, msg, content, text }) {
+    const first = text.split(/\s+/)[0].toLowerCase();
+
+    if (first === '/menu' || first === '/ayuda' || first === '/help') {
+      await sendText(
+        bot,
+        jid,
+        [
+          'BOT DE STICKERS',
+          '',
+          'Responde a una foto o video con /s y lo convierto en sticker.',
+          'Tambien funciona con un enlace: /s <enlace>',
+        ].join('\n'),
+        msg
+      );
+      return;
+    }
+
+    if (first !== '/s' && first !== '/sticker') {
+      return;
+    }
+
+    const sender = msg.key?.participant || msg.key?.participantAlt || jid;
+    const rateKey = jid + '|' + sender;
+
+    // a) /s <enlace>
+    const ownLink = extractLinkUrl(text);
+    if (ownLink) {
+      await handleLink({ sock, jid, msg, linkUrl: ownLink });
+      return;
+    }
+
+    // b) foto/video enviado con "/s" como pie de foto
+    const ownMedia = extractMedia(msg);
+    if (ownMedia) {
+      await handleMedia({ sock, jid, msg, media: ownMedia, source: msg, rateKey });
+      return;
+    }
+
+    // c) respondiendo a un mensaje
+    const ctx =
+      content.extendedTextMessage?.contextInfo ||
+      content.imageMessage?.contextInfo ||
+      content.videoMessage?.contextInfo;
+    const quoted = ctx?.quotedMessage;
+
+    if (quoted && ctx?.stanzaId) {
+      const quotedMedia = extractMedia({ message: quoted });
+
+      if (quotedMedia) {
+        const source = {
+          key: {
+            remoteJid: jid,
+            id: ctx.stanzaId,
+            participant: ctx.participant,
+            fromMe: false,
+          },
+          message: quoted,
+        };
+        await handleMedia({ sock, jid, msg, media: quotedMedia, source, rateKey });
+        return;
+      }
+
+      // respondiendo a un mensaje que es solo un enlace
+      const quotedLink = extractLinkUrl(extractText({ message: quoted }));
+      if (quotedLink) {
+        await handleLink({ sock, jid, msg, linkUrl: quotedLink });
+        return;
+      }
+    }
+
+    await sendText(bot, jid, 'Responde a una foto o video con /s para crear el sticker.', msg);
+  }
+
   return async function handleMessage(
     sock,
     msg
@@ -466,7 +621,9 @@ export function createMessageHandler({
 
       // Ignora lo que envia la propia cuenta del bot (el bot es un dispositivo
       // vinculado de ese numero): si no, podria responder en cualquier chat tuyo.
-      if (msg.key?.fromMe) {
+      const isGroupChat = String(msg.key?.remoteJid || '').endsWith('@g.us');
+
+      if (msg.key?.fromMe && !isGroupChat) {
         return;
       }
 
@@ -543,6 +700,11 @@ export function createMessageHandler({
       const text =
         extractText(msg);
 
+      if (jid.endsWith('@g.us')) {
+        await handleGroup({ sock, jid, msg, content, text });
+        return;
+      }
+
       if (text) {
         log.info(
           {
@@ -579,6 +741,7 @@ export function createMessageHandler({
               'Tambien puedes enviarme un enlace a una imagen, GIF o video (o a una pagina con imagen) y lo convierto.',
               '',
               'Comandos:',
+              'En grupos: responde a una foto o video con /s.',
               '/menu - Ver este menu',
               '/status - Estado del bot',
             ].join('\n'),
@@ -640,266 +803,13 @@ export function createMessageHandler({
         }
       }
 
-      const media =
-        extractMedia(msg);
-
-      log.info(
-        {
-          jid,
-          media:
-            media?.kind ||
-            null,
-          hasImage:
-            Boolean(
-              content.imageMessage
-            ),
-          hasVideo:
-            Boolean(
-              content.videoMessage
-            ),
-        },
-        'Media detectada'
-      );
+      const media = extractMedia(msg);
 
       if (!media) {
         return;
       }
 
-      if (
-        !checkRateLimit(jid)
-      ) {
-        await sendText(
-          bot,
-          jid,
-          'Demasiados archivos en poco tiempo. Espera un momento e intenta nuevamente.',
-          msg
-        );
-
-        return;
-      }
-
-      const declaredSize =
-        Number(
-          media.media
-            ?.fileLength || 0
-        );
-
-      log.info(
-        {
-          jid,
-          kind: media.kind,
-          declaredSize,
-          maxBytes:
-            MAX_DOWNLOAD_BYTES,
-        },
-        'Comprobando tamano del archivo'
-      );
-
-      if (
-        declaredSize >
-        MAX_DOWNLOAD_BYTES
-      ) {
-        const maxMb =
-          Math.round(
-            MAX_DOWNLOAD_BYTES /
-              1024 /
-              1024
-          );
-
-        await sendText(
-          bot,
-          jid,
-          'El archivo pesa demasiado. Maximo permitido: ' +
-            maxMb +
-            ' MB.',
-          msg
-        );
-
-        return;
-      }
-
-      log.info(
-        {
-          jid,
-          kind: media.kind,
-        },
-        'Enviando mensaje de procesamiento'
-      );
-
-      const processing =
-        await sendText(
-          bot,
-          jid,
-          media.kind ===
-          'video'
-            ? 'Procesando video...'
-            : 'Procesando imagen...',
-          msg
-        );
-
-      log.info(
-        {
-          jid,
-          messageId:
-            processing?.key?.id ||
-            null,
-        },
-        'Mensaje de procesamiento enviado'
-      );
-
-      const jobDir =
-        path.join(
-          tempDir,
-          String(Date.now()) +
-            '-' +
-            crypto
-              .randomBytes(16)
-              .toString('hex')
-              .toUpperCase()
-        );
-
-      mkdirSync(
-        jobDir,
-        {
-          recursive: true,
-        }
-      );
-
-      log.info(
-        {
-          jid,
-          jobDir,
-        },
-        'Carpeta temporal creada'
-      );
-
-      try {
-        log.info(
-          {
-            jid,
-            kind: media.kind,
-          },
-          'Iniciando descarga del multimedia'
-        );
-
-        const buffer =
-          await bot.downloadMedia(
-            msg
-          );
-
-        if (
-          !buffer ||
-          buffer.length === 0
-        ) {
-          throw new Error(
-            'La descarga devolvio un buffer vacio.'
-          );
-        }
-
-        log.info(
-          {
-            jid,
-            bytes:
-              buffer.length,
-          },
-          'Multimedia descargado'
-        );
-
-        if (
-          buffer.length >
-          MAX_DOWNLOAD_BYTES
-        ) {
-          const maxMb =
-            Math.round(
-              MAX_DOWNLOAD_BYTES /
-                1024 /
-                1024
-            );
-
-          await sendText(
-            bot,
-            jid,
-            'El archivo supera el limite de ' +
-              maxMb +
-              ' MB.',
-            msg
-          );
-
-          return;
-        }
-
-        const inputPath =
-          path.join(
-            jobDir,
-            'input.bin'
-          );
-
-        writeFileSync(
-          inputPath,
-          buffer
-        );
-
-        log.info(
-          {
-            jid,
-            inputPath,
-            bytes:
-              buffer.length,
-          },
-          'Archivo multimedia guardado'
-        );
-
-        await convertAndReply({
-          sock,
-          jid,
-          msg,
-          inputPath,
-          jobDir,
-          kind: media.kind,
-          processing,
-        });
-      } catch (e) {
-        log.error(
-          {
-            jid,
-            kind: media.kind,
-            err:
-              e?.stack ||
-              e?.message ||
-              String(e),
-          },
-          'Error procesando multimedia'
-        );
-
-        try {
-          if (processing?.key) {
-            await sock.sendMessage(jid, { delete: processing.key });
-          }
-        } catch {
-          // no es critico
-        }
-
-        await sendText(
-          bot,
-          jid,
-          e instanceof ConversionError
-            ? e.message
-            : 'No pude convertir ese archivo en sticker. Intenta con otra imagen o video.',
-          msg
-        );
-      } finally {
-        cleanupJobDir(
-          jobDir
-        );
-
-        log.info(
-          {
-            jid,
-            jobDir,
-          },
-          'Archivos temporales eliminados'
-        );
-      }
+      await handleMedia({ sock, jid, msg, media, source: msg, rateKey: jid });
     } catch (e) {
       log.error(
         {

@@ -66,6 +66,17 @@ salto (también las redirecciones) se resuelve por DNS y se rechaza si apunta a 
 se fija a la IP ya validada (evita *DNS rebinding*). Además hay límites de tamaño (`MAX_DOWNLOAD_MB`), de
 redirecciones (5) y de tiempo (`LINK_TIMEOUT_MS`), y aplica el mismo límite por minuto que los archivos.
 
+## Grupos
+
+Puedes agregar el número del bot a un grupo. Ahí **no responde a nada automáticamente**; solo actúa con:
+
+- **`/s` respondiendo a una foto o video** → lo convierte en sticker.
+- **`/s` como pie de foto/video** al enviarlo.
+- **`/s <enlace>`**, o `/s` respondiendo a un mensaje que sea solo un enlace.
+- `/menu` muestra la ayuda.
+
+En chat privado sigue siendo automático (envías foto/video/enlace y responde).
+
 ## Comandos
 
 ```
